@@ -355,7 +355,11 @@ type ResponsesOutput struct {
 	Output              json.RawMessage                 `json:"output,omitempty"`
 	ItemError           json.RawMessage                 `json:"error,omitempty"`
 	ApprovalRequestID   string                          `json:"approval_request_id,omitempty"`
-	MCPTools            json.RawMessage                 `json:"tools,omitempty"`
+	// EncryptedContent 是可空 string;reasoning item 的加密内容(signature)原字符串透传载体,仅用于 type==reasoning。
+	EncryptedContent string `json:"encrypted_content,omitempty"`
+	// OutputItemID 是可空 string;web_search_call item 的关联 ID 回退载体,仅用于 type==web_search_call。
+	OutputItemID string          `json:"output_item_id,omitempty"`
+	MCPTools     json.RawMessage `json:"tools,omitempty"`
 }
 
 // MarshalJSON keeps hosted-tool variants within their protocol-specific
@@ -365,11 +369,12 @@ func (r ResponsesOutput) MarshalJSON() ([]byte, error) {
 	switch r.Type {
 	case "web_search_call":
 		return kitutil.Marshal(struct {
-			Type   string          `json:"type"`
-			ID     string          `json:"id"`
-			Status string          `json:"status,omitempty"`
-			Action json.RawMessage `json:"action,omitempty"`
-		}{Type: r.Type, ID: r.ID, Status: r.Status, Action: r.Action})
+			Type         string          `json:"type"`
+			ID           string          `json:"id"`
+			Status       string          `json:"status,omitempty"`
+			Action       json.RawMessage `json:"action,omitempty"`
+			OutputItemID string          `json:"output_item_id,omitempty"`
+		}{Type: r.Type, ID: r.ID, Status: r.Status, Action: r.Action, OutputItemID: r.OutputItemID})
 	case "mcp_call":
 		return kitutil.Marshal(struct {
 			Type              string          `json:"type"`
@@ -515,20 +520,24 @@ const (
 
 // ResponsesStreamResponse 用于处理 /v1/responses 流式响应
 type ResponsesStreamResponse struct {
-	Type            string                   `json:"type"`
-	Response        *OpenAIResponsesResponse `json:"response,omitempty"`
-	Code            string                   `json:"code,omitempty"`
-	Message         string                   `json:"message,omitempty"`
-	Param           string                   `json:"param,omitempty"`
-	Delta           string                   `json:"delta,omitempty"`
-	Arguments       *string                  `json:"arguments,omitempty"`
-	Name            string                   `json:"name,omitempty"`
-	Text            *string                  `json:"text,omitempty"`
-	Item            *ResponsesOutput         `json:"item,omitempty"`
-	SequenceNumber  *int                     `json:"sequence_number,omitempty"`
-	Annotation      json.RawMessage          `json:"annotation,omitempty"`
-	AnnotationIndex *int                     `json:"annotation_index,omitempty"`
-	Obfuscation     string                   `json:"obfuscation,omitempty"`
+	Type     string                   `json:"type"`
+	Response *OpenAIResponsesResponse `json:"response,omitempty"`
+	Code     string                   `json:"code,omitempty"`
+	Message  string                   `json:"message,omitempty"`
+	Param    string                   `json:"param,omitempty"`
+	// Codex 线形顶层 error 事件的载体(§8.3 流内错误规范化):嵌套 error 对象 + 根级 error_type。
+	// 与根级 Code/Message/Param(OpenAI 平台线形)分工,互不串扰。Error 为 interface,非 nil 即保留。
+	Error           any              `json:"error,omitempty"`      // 顶层 {"type":"error","error":{...}} 事件的内嵌错误对象载体
+	ErrorType       string           `json:"error_type,omitempty"` // 顶层 error 事件的根级 error_type 载体(规范化 t 的第二回退来源)
+	Delta           string           `json:"delta,omitempty"`
+	Arguments       *string          `json:"arguments,omitempty"`
+	Name            string           `json:"name,omitempty"`
+	Text            *string          `json:"text,omitempty"`
+	Item            *ResponsesOutput `json:"item,omitempty"`
+	SequenceNumber  *int             `json:"sequence_number,omitempty"`
+	Annotation      json.RawMessage  `json:"annotation,omitempty"`
+	AnnotationIndex *int             `json:"annotation_index,omitempty"`
+	Obfuscation     string           `json:"obfuscation,omitempty"`
 	// - response.function_call_arguments.delta
 	// - response.function_call_arguments.done
 	OutputIndex  *int                           `json:"output_index,omitempty"`

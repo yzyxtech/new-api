@@ -9,6 +9,8 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/relay/channel"
+	"github.com/QuantumNous/new-api/relay/channel/codex"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -71,6 +73,25 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 				}
 			}
 		}
+	}
+
+	if !model_setting.GetGlobalSettings().PassThroughRequestEnabled &&
+		!info.ChannelSetting.PassThroughBodyEnabled &&
+		service.ShouldClaudeMessagesBridgeToCodex(info.ChannelId, info.ChannelType, info.OriginModelName) {
+		// Codex bridge 分支:policy 命中且选中渠道为 Codex(truth table #2)。先把既有
+		// channel.Adaptor 收窄为 concrete *codex.Adaptor;失败按 A-29 固定 500
+		// invalid_api_type + skip,不得进入 bridge、不参与 mapping。
+		codexAdaptor, a29Err := assertCodexBridgeAdaptor(adaptor)
+		if a29Err != nil {
+			return a29Err
+		}
+		usage, newApiErr := codex.BridgeClaudeMessages(c, info, codexAdaptor, request)
+		if newApiErr != nil {
+			return newApiErr
+		}
+
+		service.PostTextConsumeQuota(c, info, usage, nil)
+		return nil
 	}
 
 	if !model_setting.GetGlobalSettings().PassThroughRequestEnabled &&
@@ -154,4 +175,16 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 
 	service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
 	return nil
+}
+
+// assertCodexBridgeAdaptor 是 A-29 的类型断言:把既有 channel.Adaptor 收窄为 concrete
+// *codex.Adaptor,供 Codex bridge 分支使用。若无法收窄(Codex 渠道却取不到 concrete
+// codex adaptor,属本地配置/注册不变量破坏),返回 A-29 错误:new_api_error /
+// invalid_api_type / 初始 500 / SkipRetry,不参与 mapping。
+func assertCodexBridgeAdaptor(adaptor channel.Adaptor) (*codex.Adaptor, *types.NewAPIError) {
+	codexAdaptor, ok := adaptor.(*codex.Adaptor)
+	if !ok {
+		return nil, types.NewError(fmt.Errorf("invalid Codex adaptor: %T", adaptor), types.ErrorCodeInvalidApiType, types.ErrOptionWithSkipRetry())
+	}
+	return codexAdaptor, nil
 }

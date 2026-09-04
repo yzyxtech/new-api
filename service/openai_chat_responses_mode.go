@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"sync"
 
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 )
 
@@ -51,4 +52,11 @@ func ShouldChatCompletionsUseResponsesGlobal(channelID int, channelType int, mod
 		channelType,
 		model,
 	)
+}
+
+// ShouldClaudeMessagesBridgeToCodex 判定 /v1/messages 是否应经 Codex bridge
+// 链路转发:当且仅当全局 policy 命中且目标渠道类型为 Codex 时返回 true。
+// policy 命中但渠道非 Codex 走既有 non-bridge 编排路径;policy 未命中走原生路径。
+func ShouldClaudeMessagesBridgeToCodex(channelID, channelType int, originModelName string) bool {
+	return ShouldChatCompletionsUseResponsesGlobal(channelID, channelType, originModelName) && channelType == constant.ChannelTypeCodex
 }

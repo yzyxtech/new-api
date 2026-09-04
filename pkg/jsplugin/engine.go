@@ -116,7 +116,8 @@ type Engine struct {
 	now       func() time.Time
 	log       func(string)
 	module    *sobek.SourceTextModuleRecord
-	pool      sync.Pool
+	instance  *runtimeInstance
+	mu        sync.Mutex
 	semaphore chan struct{}
 }
 
@@ -177,7 +178,7 @@ func Compile(source string, options Options) (*Engine, error) {
 		return nil, err
 	}
 	instance.logContext.context = nil
-	engine.pool.Put(instance)
+	engine.instance = instance
 	return engine, nil
 }
 
@@ -191,17 +192,10 @@ func (e *Engine) Export(ctx context.Context, exportName string) (result any, err
 		return nil, ctx.Err()
 	}
 
-	instance, err := e.getRuntime(ctx)
-	if err != nil {
-		return nil, err
-	}
+	instance := e.getRuntime(ctx)
 	reusable := true
 	defer func() {
-		instance.runtime.ClearInterrupt()
-		instance.logContext.context = nil
-		if reusable {
-			e.pool.Put(instance)
-		}
+		e.releaseRuntime(instance, reusable)
 	}()
 	timedOut := errors.New("plugin export timed out")
 	timer := time.AfterFunc(e.timeout, func() { instance.runtime.Interrupt(timedOut) })
@@ -237,13 +231,9 @@ func (e *Engine) HasExport(ctx context.Context, exportName string) (bool, error)
 	case <-ctx.Done():
 		return false, ctx.Err()
 	}
-	instance, err := e.getRuntime(ctx)
-	if err != nil {
-		return false, err
-	}
+	instance := e.getRuntime(ctx)
 	defer func() {
-		instance.logContext.context = nil
-		e.pool.Put(instance)
+		e.releaseRuntime(instance, true)
 	}()
 	value := instance.module.GetBindingValue(exportName)
 	return value != nil && !sobek.IsUndefined(value), nil
@@ -258,17 +248,10 @@ func (e *Engine) HasCallablePath(ctx context.Context, exportName string, members
 	case <-ctx.Done():
 		return false, ctx.Err()
 	}
-	instance, err := e.getRuntime(ctx)
-	if err != nil {
-		return false, err
-	}
+	instance := e.getRuntime(ctx)
 	reusable := true
 	defer func() {
-		instance.runtime.ClearInterrupt()
-		instance.logContext.context = nil
-		if reusable {
-			e.pool.Put(instance)
-		}
+		e.releaseRuntime(instance, reusable)
 	}()
 	timedOut := errors.New("plugin inspection timed out")
 	timer := time.AfterFunc(e.timeout, func() { instance.runtime.Interrupt(timedOut) })
@@ -340,17 +323,10 @@ func (e *Engine) call(
 	}
 	defer func() { <-e.semaphore }()
 
-	instance, err := e.getRuntime(ctx)
-	if err != nil {
-		return nil, err
-	}
+	instance := e.getRuntime(ctx)
 	reusable := true
 	defer func() {
-		instance.runtime.ClearInterrupt()
-		instance.logContext.context = nil
-		if reusable {
-			e.pool.Put(instance)
-		}
+		e.releaseRuntime(instance, reusable)
 	}()
 
 	hookName := strings.Join(append([]string{exportName}, members...), ".")
@@ -464,13 +440,26 @@ func resolveExportPath(instance *runtimeInstance, exportName string, members []s
 	return value, hookName, true
 }
 
-func (e *Engine) getRuntime(ctx context.Context) (*runtimeInstance, error) {
-	if pooled := e.pool.Get(); pooled != nil {
-		instance := pooled.(*runtimeInstance)
-		instance.logContext.context = ctx
-		return instance, nil
+func (e *Engine) getRuntime(ctx context.Context) *runtimeInstance {
+	e.mu.Lock()
+	e.instance.logContext.context = ctx
+	return e.instance
+}
+
+// releaseRuntime returns the single runtime instance to the engine. The
+// instance is reused across calls so module-level JavaScript state persists;
+// only an interrupted (timed-out) instance is discarded and recreated, since
+// its runtime may be left in an inconsistent state.
+func (e *Engine) releaseRuntime(instance *runtimeInstance, reusable bool) {
+	instance.runtime.ClearInterrupt()
+	instance.logContext.context = nil
+	if !reusable {
+		if recreated, err := e.newRuntime(context.Background()); err == nil {
+			recreated.logContext.context = nil
+			e.instance = recreated
+		}
 	}
-	return e.newRuntime(ctx)
+	e.mu.Unlock()
 }
 
 func (e *Engine) newRuntime(ctx context.Context) (instance *runtimeInstance, err error) {

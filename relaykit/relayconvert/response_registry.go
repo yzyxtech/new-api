@@ -105,7 +105,14 @@ type ResponseStreamState struct {
 	diagnostics        []types.ConversionDiagnostic
 	pendingDiagnostics []types.ConversionDiagnostic
 	seenDiagnostics    map[conversionDiagnosticKey]struct{}
-	fallbackInfo       *convmeta.Values
+	// conversionDiagnosticsTruncated 记录任一步骤转换器上报的"本类别 distinct 诊断超出
+	// 其有界保留量"的溢出信号(经 rememberStepDiagnostics 从步骤 state 的
+	// ConversionDiagnosticsTruncated() 汇入)。全请求权威 truncated 由 root 侧既有
+	// RecordConversionDiagnostics 按全局 32 条 distinct 上限裁决并落入
+	// admin_info.conversion_diagnostics_truncated;本标志是该信号在 ResponseStreamState
+	// 层的可观测投影。
+	conversionDiagnosticsTruncated bool
+	fallbackInfo                   *convmeta.Values
 }
 
 type responseStreamUsageCarrier interface {
@@ -382,6 +389,7 @@ func FinalizeStreamResponse(c context.Context, info convmeta.Meta, state *Respon
 		if err != nil {
 			return nil, err
 		}
+		state.rememberStepDiagnostics(state.stepStates[i])
 		if stepUsage != nil {
 			usage = stepUsage
 			state.rememberUsage(stepUsage)
@@ -616,6 +624,7 @@ func executeResponseStreamSteps(c context.Context, info convmeta.Meta, state *Re
 			if err != nil {
 				return nil, nil, err
 			}
+			state.rememberStepDiagnostics(state.stepStates[i])
 			if stepUsage != nil {
 				usage = stepUsage
 				state.rememberUsage(stepUsage)
@@ -692,6 +701,37 @@ func (s *ResponseStreamState) rememberDiagnostics(diagnostics []types.Conversion
 		s.diagnostics = append(s.diagnostics, diagnostic)
 		s.pendingDiagnostics = append(s.pendingDiagnostics, diagnostic)
 	}
+}
+
+// rememberStepDiagnostics drains stream-step converter-local diagnostics into the shared
+// ResponseStreamState so the root RecordConversionDiagnostics path can persist them into
+// admin_info.conversion_diagnostics with global bounded retention (min(d, max(0, 32-n))).
+// Only step states exposing ConversionDiagnostics() participate; other states are no-ops.
+// A step that also exposes ConversionDiagnosticsTruncated() (a category-level overflow
+// signal, e.g. the oairesponses collector) additionally sets this state's truncated flag so
+// the whole-request overflow signal is observed at ResponseStreamState level.
+func (s *ResponseStreamState) rememberStepDiagnostics(stepState any) {
+	if s == nil {
+		return
+	}
+	if source, ok := stepState.(interface {
+		ConversionDiagnostics() []types.ConversionDiagnostic
+	}); ok {
+		s.rememberDiagnostics(source.ConversionDiagnostics())
+	}
+	if trunc, ok := stepState.(interface {
+		ConversionDiagnosticsTruncated() bool
+	}); ok && trunc.ConversionDiagnosticsTruncated() {
+		s.conversionDiagnosticsTruncated = true
+	}
+}
+
+// ConversionDiagnosticsTruncated reports whether any stream step signaled a category-level
+// overflow beyond its own bounded diagnostic retention. The whole-request authoritative
+// truncation is decided by root RecordConversionDiagnostics and surfaced as
+// admin_info.conversion_diagnostics_truncated.
+func (s *ResponseStreamState) ConversionDiagnosticsTruncated() bool {
+	return s != nil && s.conversionDiagnosticsTruncated
 }
 
 func (s *ResponseStreamState) takeDiagnostics(hasOutput bool) []types.ConversionDiagnostic {

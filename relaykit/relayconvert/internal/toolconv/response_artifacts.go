@@ -206,6 +206,13 @@ func extractOpenAIHostedResponse(response any) (any, HostedResponseSet, error) {
 			set.RegularPositions = append(set.RegularPositions, position)
 			continue
 		}
+		// web_search_call 由基础转换器直接映射为 server_tool_use + web_search_tool_result,
+		// 不经 hosted-tool 层剥离/重挂,避免其被 attachClaudeHostedResponse 丢弃。
+		if hostedKindFromResponsesType(output.Type) == KindWebSearch {
+			clone.Output = append(clone.Output, output)
+			set.RegularPositions = append(set.RegularPositions, position)
+			continue
+		}
 		rawOutput, err := kitutil.Marshal(output)
 		if err != nil {
 			return nil, set, fmt.Errorf("output[%d]: %w", position, err)
